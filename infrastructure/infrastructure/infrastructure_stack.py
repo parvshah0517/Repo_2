@@ -1,10 +1,17 @@
 
-from aws_cdk import Stack
-from aws_cdk import aws_ec2 as ec2
+from aws_cdk import Stack, CfnOutput
 from constructs import Construct
+
+from .network.vpc import create_vpc
+from .security.security_groups import SecurityGroups
+from .load_balancer.alb import ApplicationLoadBalancerConstruct
+from .compute.web_asg import WebAutoScalingGroup
+from .compute.backend_asg import BackendAutoScalingGroup
+from .database.rds import RdsDatabaseConstruct
 
 
 class InfrastructureStack(Stack):
+
     def __init__(
         self,
         scope: Construct,
@@ -13,29 +20,66 @@ class InfrastructureStack(Stack):
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
-        # Network spanning two Availability Zones
-        self.vpc = ec2.Vpc(
+        # 1. Create the network
+        self.vpc = create_vpc(
             self,
             "MigrationVpc",
-            vpc_name="migration-vpc",
-            ip_addresses=ec2.IpAddresses.cidr("10.20.0.0/16"),
-            max_azs=2,
-            nat_gateways=2,
-            subnet_configuration=[
-                ec2.SubnetConfiguration(
-                    name="public",
-                    subnet_type=ec2.SubnetType.PUBLIC,
-                    cidr_mask=24,
-                ),
-                ec2.SubnetConfiguration(
-                    name="application",
-                    subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,
-                    cidr_mask=24,
-                ),
-                ec2.SubnetConfiguration(
-                    name="database",
-                    subnet_type=ec2.SubnetType.PRIVATE_ISOLATED,
-                    cidr_mask=24,
-                ),
-            ],
+        )
+
+        # 2. Create security groups
+        self.security_groups = SecurityGroups(
+            self,
+            "SecurityGroups",
+            vpc=self.vpc,
+        )
+
+        # 3. Create the Application Load Balancer
+        self.load_balancer = ApplicationLoadBalancerConstruct(
+            self,
+            "LoadBalancer",
+            vpc=self.vpc,
+            alb_security_group=self.security_groups.alb,
+        )
+
+        # 4. Create the backend Auto Scaling Group
+        self.backend_tier = BackendAutoScalingGroup(
+            self,
+            "BackendTier",
+            vpc=self.vpc,
+            backend_security_group=self.security_groups.backend,
+        )
+
+        # 5. Create the RDS database
+        self.rds_database = RdsDatabaseConstruct(
+            self,
+            "RdsDatabase",
+            vpc=self.vpc,
+            database_security_group=self.security_groups.database,
+        )
+
+        # 6. Grant the backend access to database credentials
+        self.rds_database.database.secret.grant_read(
+            self.backend_tier.asg.role
+        )
+
+        # 7. Export database connection details
+        CfnOutput(
+            self,
+            "DatabaseEndpoint",
+            value=self.rds_database.database.db_instance_endpoint_address,
+            description="RDS MySQL endpoint",
+        )
+
+        CfnOutput(
+            self,
+            "DatabasePort",
+            value=self.rds_database.database.db_instance_endpoint_port,
+            description="RDS MySQL port",
+        )
+
+        CfnOutput(
+            self,
+            "DatabaseSecretArn",
+            value=self.rds_database.database.secret.secret_arn,
+            description="Secrets Manager ARN for database credentials",
         )
